@@ -13,7 +13,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange, repeat
-from scipy import special as ss
 
 contract = oe.contract
 contract_expression = oe.contract_expression

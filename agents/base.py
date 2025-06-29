@@ -6,8 +6,6 @@ import abc
 import numpy as np
 import torch
 import wandb
-import h5py
-import dataclasses
 from tqdm import tqdm
 from loguru import logger
 from copy import deepcopy
@@ -16,7 +14,6 @@ from typing import List, Tuple, Optional, Dict, Union
 
 from agents.s4d import S4
 from agents.transformer import Transformer, Cache, TransformerHiddenState
-from agents.rfb.memory_cells import positional_encoding, LinearAttentionBlock
 from agents.utils import TruncatedNormal, SquashedNormal
 from rewards import RewardFunctionConstructor
 
@@ -639,27 +636,6 @@ class Batch:
     labels: Optional[torch.Tensor] = None
     gciql_goals: Optional[torch.Tensor] = None
 
-
-@dataclasses.dataclass
-class AmagoBatch:
-    """
-    Dataclass for batches of offline data for Amago.
-
-    Args:
-        obs: tensor of observations
-        goals: tensor of goals
-        rl2: tensor of (dones, rewards, time, actions)
-    """
-
-    obs: Dict[str, torch.Tensor]
-    goals: torch.Tensor
-    rl2s: torch.Tensor
-    actions: torch.Tensor
-    dones: torch.Tensor
-    rews: torch.Tensor
-    time_idxs: torch.Tensor  # time index of each transition in trajectory
-
-
 class AbstractReplayBuffer(metaclass=abc.ABCMeta):
     """
     Abstract replay buffer class for storing
@@ -1120,24 +1096,6 @@ class MemoryEfficientOfflineReplayBuffer:
             stacked_next_goal = stacked_next_goal.reshape(
                 stacked_next_goal.shape[0], -1
             )
-
-        # take final frame as goal if using multiple frames
-        # and its FB
-        # if self._frames > 1 and fb and self._obs_type == "states":
-        #     stacked_goal = self._goal_function(stacked_obs[:, -1, :])
-        #     stacked_next_goal = self._goal_function(stacked_next_obs[:, -1, :])
-        # # otherwise flatten frames
-        # elif self._frames > 1 and not fb:
-        #     stacked_goal = self._goal_function(
-        #         stacked_obs.reshape(stacked_obs.shape[0], -1)
-        #     )
-        #     stacked_next_goal = self._goal_function(
-        #         stacked_next_obs.reshape(stacked_next_obs.shape[0], -1)
-        #     )
-        # # otherwise no flattening required
-        # else:
-        #     stacked_goal = stacked_obs
-        #     stacked_next_goal = stacked_next_obs
 
         action = self._storage["action"][ep_idx, step_idx]
 
@@ -1609,163 +1567,6 @@ class MemoryEfficientOfflineReplayBuffer:
 
     def add(self, *args, **kwargs):
         pass
-
-
-class PopgymReplaybuffer(MemoryEfficientOfflineReplayBuffer):
-    """
-    Popgym replay buffer. Inherits most methods from ExorlReplayBuffer,
-    but has a different `load_offline_dataset` because the number
-    of episodes and their lengths is not fixed for Popgym.
-    """
-
-    def __init__(
-        self,
-        dataset_path: Path,
-        discount: float,
-        device: torch.device,
-        reward_occlusion: callable,
-        dynamics_occlusion: callable,
-        frames: int,
-        pad_with_zeros: bool,
-        history_length: int,
-        max_episode_length: int,
-        goal_history_length: int,
-        goal_frames: int,
-        domain: str,
-        discrete: bool,
-    ):
-
-        super().__init__(
-            dataset_paths=[dataset_path],
-            reward_constructors=None,
-            eval_multipliers=[1.0],  # not used in popgym
-            discount=discount,
-            goal_frames=goal_frames,
-            device=device,
-            max_episodes=None,  # we infer this from the dataset we load
-            reward_occlusion=reward_occlusion,
-            dynamics_occlusion=dynamics_occlusion,
-            relabel=False,
-            frames=frames,
-            obs_type="states",
-            pad_with_zeros=pad_with_zeros,
-            task="default",
-            history_length=history_length,
-            load_on_init=False,
-            goal_history_length=goal_history_length,
-        )
-        self._loaded_episodes = None
-        self._max_episode_length = max_episode_length
-        self._idx = 0
-        self._domain = domain
-        dataset = self.load_offline_dataset(
-            dataset_path=dataset_path,
-        )
-
-        self._storage = dataset
-        self._is_fixed_episode_length = False
-        self._full = True
-        self._discrete = discrete
-
-    def __len__(self) -> int:
-        return self._loaded_episodes if self._full else self._idx
-
-    def load_offline_dataset(
-        self,
-        dataset_path: Path,
-    ):
-
-        logger.info(f"Loading replay buffer from {dataset_path}")
-        # load offline dataset in the form of episode paths
-        episodes = np.load(dataset_path, allow_pickle=True)
-        episodes = dict(episodes)
-
-        storage = {}
-
-        self._loaded_episodes = len(episodes)
-        self._episode_lengths = np.zeros(self._loaded_episodes, dtype=np.int32)
-
-        # load episodes
-        for i, (_, episode) in enumerate(tqdm(episodes.items())):
-            episode = episode.item()
-
-            for name, values in episode.items():
-
-                # unsqueeze last dim for RepeatPreviousHard
-                if (
-                    self._domain
-                    in (
-                        "RepeatPreviousHard",
-                        "RepeatPreviousMedium",
-                        "RepeatPreviousEasy",
-                    )
-                    and name == "observation"
-                ):
-                    values = np.expand_dims(values, -1)
-
-                if name not in storage:
-                    storage[name] = np.empty(
-                        (
-                            self._loaded_episodes,
-                            self._max_episode_length,
-                            values.shape[-1],
-                        ),
-                        dtype=np.float32,
-                    )
-
-                    if "goal" not in storage:
-                        storage["goal"] = np.empty(
-                            (
-                                self._loaded_episodes,
-                                self._max_episode_length,
-                                values.shape[-1],
-                            ),
-                            dtype=np.float32,
-                        )
-
-                # add values and nan out empties
-                if len(values.shape) > 2:
-                    values = values.squeeze(1)
-
-                if name == "observation":
-                    storage["observation"][i][: values.shape[0]] = np.array(
-                        values, dtype=np.float32
-                    )
-                    storage["goal"][i][: values.shape[0]] = np.array(
-                        values, dtype=np.float32
-                    )
-                    storage["observation"][i][
-                        values.shape[0] :
-                    ] = np.nan  # nan out the remaining part for loud failure
-                    storage["goal"][i][
-                        values.shape[0] :
-                    ] = np.nan  # nan out the remaining part for loud failure
-                else:
-                    storage[name][i][: values.shape[0]] = np.array(
-                        values, dtype=np.float32
-                    )
-                    storage[name][i][
-                        values.shape[0] :
-                    ] = np.nan  # nan out the remaining part for loud failure
-
-                if name == "discount":
-                    self._episode_lengths[i] = (
-                        len(values) - 1
-                    )  # compensate for the dummy transition at the beginning
-
-            # hack the dones (we know last transition is terminal)
-            if "not_done" not in storage:
-                storage["not_done"] = np.empty(
-                    (self._loaded_episodes, self._max_episode_length, 1),
-                    dtype=float,
-                )
-            not_done = np.ones_like(storage["discount"][i], dtype=float)
-            not_done[self._episode_lengths[i]] = 0.0
-            not_done[self._episode_lengths[i] + 1 :] = np.nan  # nans for loud bugs
-            storage["not_done"][i] = not_done
-            # self._idx += 1
-
-        return storage
 
 
 class OfflineReplayBuffer(AbstractOfflineReplayBuffer):
@@ -2253,177 +2054,6 @@ class OfflineReplayBuffer(AbstractOfflineReplayBuffer):
         pass
 
 
-class D4RLReplayBuffer(AbstractOfflineReplayBuffer):
-    """D4RL replay buffer."""
-
-    def __init__(
-        self,
-        dataset_path: Path,
-        discount: float,
-        device: torch.device,
-    ):
-        super().__init__(device=device)
-
-        self._discount = discount
-        self.storage = {}
-
-        # load dataset on init
-        self.load_offline_dataset(dataset_path=dataset_path)
-
-    def load_offline_dataset(self, dataset_path: Path) -> None:
-
-        dataset = {}
-        with h5py.File(dataset_path, "r") as dataset_file:
-            for k in tqdm(self._get_keys(dataset_file), desc="Loading data into RAM"):
-                try:  # first try loading as an array
-                    dataset[k] = dataset_file[k][:]
-                except ValueError:  # try loading as a scalar
-                    dataset[k] = dataset_file[k][()]
-
-        N = dataset["rewards"].shape[0]
-        observations = []
-        next_observations = []
-        goals = []
-        next_goals = []
-        actions = []
-        rewards = []
-        not_dones = []
-        discounts = []
-
-        # The newer version of the dataset adds an explicit
-        # timeouts field. Keep old method for backwards compatability.
-        use_timeouts = False
-        terminate_on_end = False
-        if "timeouts" in dataset:
-            use_timeouts = True
-
-        episode_step = 0
-        for i in tqdm(range(N - 1), "Configuring dataset"):
-            obs = dataset["observations"][i].astype(np.float32)
-            next_obs = dataset["observations"][i + 1].astype(np.float32)
-            action = dataset["actions"][i].astype(np.float32)
-            reward = dataset["rewards"][i].astype(np.float32)
-            not_done = bool(~dataset["terminals"][i])
-
-            if use_timeouts:
-                final_timestep = dataset["timeouts"][i]
-            else:
-                final_timestep = episode_step == 1000 - 1
-            if (not terminate_on_end) and final_timestep:
-                # Skip this transition and don't apply terminals on
-                # the last step of an episode
-                episode_step = 0
-                continue
-            if ~not_done or final_timestep:
-                episode_step = 0
-
-            observations.append(obs)
-            next_observations.append(next_obs)
-            goals.append(obs)
-            next_goals.append(next_obs)
-            actions.append(action)
-            rewards.append([reward])
-            not_dones.append(not_done)
-            discounts.append([self._discount])
-            episode_step += 1
-
-        # concatenate into storage
-        self.storage["observations"] = torch.as_tensor(
-            np.array(observations), device=self.device
-        )
-        self.storage["actions"] = torch.as_tensor(np.array(actions), device=self.device)
-        self.storage["rewards"] = torch.as_tensor(np.array(rewards), device=self.device)
-        self.storage["next_observations"] = torch.as_tensor(
-            np.array(next_observations), device=self.device
-        )
-        self.storage["goals"] = torch.as_tensor(np.array(goals), device=self.device)
-        self.storage["next_goals"] = torch.as_tensor(
-            np.array(next_goals), device=self.device
-        )
-        self.storage["discounts"] = torch.as_tensor(
-            np.array(discounts), device=self.device, dtype=torch.float
-        )
-        self.storage["not_dones"] = torch.as_tensor(
-            np.array(not_dones), device=self.device
-        )
-
-    def sample(self, batch_size: int) -> Batch:
-        """
-        Samples OfflineBatch from the replay buffer.
-        Args:
-            batch_size: the batch size
-        Returns:
-            Batch: the batch of transitions
-        """
-
-        if len(self.storage) == 0:
-            raise RuntimeError("The replay buffer is empty.")
-
-        batch_indices = torch.randint(
-            0, len(self.storage["observations"]), (batch_size,)
-        )  # TODO: make attribute of replay buffer
-
-        return Batch(
-            observations=self.storage["observations"][batch_indices],
-            actions=self.storage["actions"][batch_indices],
-            rewards=self.storage["rewards"][batch_indices],
-            next_observations=self.storage["next_observations"][batch_indices],
-            discounts=self.storage["discounts"][batch_indices],
-            not_dones=self.storage["not_dones"][batch_indices],
-            goals=self.storage["goals"][batch_indices],
-            next_goals=self.storage["next_goals"][batch_indices],
-        )
-
-    def sample_task_inference_transitions(
-        self,
-        inference_steps: int,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-
-        """
-        Sample transitions from the replay buffer for FB task inference.
-        Args:
-            inference_steps: number of transitions to sample
-        Returns:
-            z_inf_goals: dictionary of task inference transitions
-                for each environment variant
-            z_inf_rewards: dictionary of task inference rewards for each
-                environment variant
-        """
-
-        if len(self.storage) == 0:
-            raise RuntimeError(
-                "The replay buffer is empty. Task inference sampling"
-                "can only be performed after the replay buffer has been"
-                "loaded."
-            )
-
-        assert inference_steps <= len(self.storage["observations"])
-
-        # sample transitions from the replay buffer for processing
-        batch_indices = torch.randint(
-            0, len(self.storage["observations"]), (inference_steps,)
-        )
-
-        observations = self.storage["observations"][batch_indices]
-        rewards = self.storage["rewards"][batch_indices]
-
-        return observations, rewards
-
-    def _get_keys(self, h5file):
-        keys = []
-
-        def visitor(name, item):
-            if isinstance(item, h5py.Dataset):
-                keys.append(name)
-
-        h5file.visititems(visitor)
-
-        return keys
-
-    def add(self, *args, **kwargs):
-        pass
-
-
 class AbstractWorkspace(metaclass=abc.ABCMeta):
     """
     Abstract workspace for training and evaluating agents
@@ -2499,7 +2129,7 @@ class AbstractRecurrentEncoder(torch.nn.Module, metaclass=abc.ABCMeta):
         a ReLU activation.
         """
 
-        if isinstance(self, (FARTEncoder, TransformerEncoder)):
+        if isinstance(self, (TransformerEncoder)):
             postprocessor_layer = [
                 torch.nn.Linear(
                     self._transformer_dimension,
@@ -2980,104 +2610,6 @@ class TransformerEncoder(AbstractRecurrentEncoder):
         return hidden_state
 
 
-class FARTEncoder(AbstractRecurrentEncoder):
-    """
-    Encodes sequences using a Fast Autoregressive Transformer (FART).
-    """
-
-    def __init__(
-        self,
-        raw_input_dimension: int,  # raw sequence dims
-        preprocessed_dimension: int,  # preprocessor embedding dim
-        postprocessed_dimension: int,  # postprocessor embedding dim
-        transformer_dimension: int,  # k, v, q dim
-        device: torch.device,
-        pooling: str,
-        history_length: int,
-    ):
-        super().__init__(
-            raw_input_dimension=raw_input_dimension,
-            preprocessed_dimension=preprocessed_dimension,
-            postprocessed_dimension=postprocessed_dimension,
-            transformer_dimension=transformer_dimension,
-            device=device,
-        )
-        self.encoder = LinearAttentionBlock(
-            input_size=preprocessed_dimension,
-            hidden_size=transformer_dimension,
-        ).to(self._device)
-
-        self._pooling = pooling
-        self._history_length = history_length
-        self._transformer_dimension = transformer_dimension
-
-        # positional encoder
-        # 1000 for episode length
-        self.positional_encoding = (
-            torch.nn.Embedding.from_pretrained(
-                positional_encoding(
-                    1000 + self._history_length,
-                    preprocessed_dimension,
-                    device=self._device,
-                )
-            )
-            .requires_grad_(False)
-            .to(self._device)
-        )
-
-    def forward(
-        self,
-        history: torch.Tensor,
-        first_time_idx: torch.Tensor,
-        previous_hidden_state: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
-    ) -> Tuple[torch.Tensor, List[torch.Tensor]]:
-
-        # preprocessor
-        history = self.preprocessor.forward(history)
-
-        # positional encoding
-        history_length = history.size(1)
-        time_indices = first_time_idx + torch.arange(history_length).to(self._device)
-        pos_embedding = self.positional_encoding(time_indices)
-        history = history + pos_embedding
-
-        # encoder
-        if previous_hidden_state is not None:
-            output, hidden_state = self.encoder.forward(
-                history=history, previous_hidden_state=previous_hidden_state
-            )
-        else:
-            output, hidden_state = self.encoder.forward(history=history)
-
-        output = self.postprocessor.forward(
-            output,
-        )
-
-        # pool output
-        if self._pooling == "last":
-            output = output[:, -1, :]
-        elif self._pooling == "mean":
-            output = output.mean(dim=1)
-        else:
-            raise ValueError(f"Pooling method {self._pooling} not recognised.")
-
-        return output, hidden_state
-
-    @torch.no_grad()
-    def init_internal_state(self) -> Tuple[torch.Tensor, torch.Tensor]:
-        s = torch.zeros(
-            1,
-            1,
-            self._transformer_dimension,
-            self._transformer_dimension,
-            device=self._device,
-        )
-        z = torch.zeros(1, 1, self._transformer_dimension, device=self._device)
-        internal_state = (s, z)
-
-        return internal_state
-
-
 class AbstractRecurrentActor(torch.nn.Module, metaclass=abc.ABCMeta):
     """
     Defines an actor network that takes in a sequence of observations.
@@ -3540,110 +3072,6 @@ class LSTMActor(AbstractRecurrentActor):
     ]:
         """
         Initializes the internal state of the LSTM encoder.
-        """
-        if self._obs_z_encoder:
-            return (
-                self.obs_action_encoder.init_internal_state(),
-                self.obs_encoder.init_internal_state(),
-            )
-        else:
-            return self.obs_action_encoder.init_internal_state(), None
-
-
-class FARTActor(AbstractRecurrentActor):
-    """
-    Actor that uses a FART to encode the sequence of observations and actions.
-    """
-
-    def __init__(
-        self,
-        observation_length: int,
-        action_length: int,
-        z_length: int,
-        preprocessed_dimension: int,  # preprocessor embedding dim
-        postprocessed_dimension: int,  # postprocessor embedding dim
-        transformer_dimension: int,  # k, v, q dim
-        obs_encoder_hidden_dimension: int,
-        actor_hidden_dimension: int,
-        actor_hidden_layers: int,
-        std_dev_clip: float,
-        device: torch.device,
-        pooling: str,
-        history_length: int,
-        obs_z_encoder: bool,
-    ):
-        super().__init__(
-            observation_length=observation_length,
-            action_length=action_length,
-            postprocessed_dimension=postprocessed_dimension,
-            actor_hidden_dimension=actor_hidden_dimension,
-            actor_hidden_layers=actor_hidden_layers,
-            std_dev_clip=std_dev_clip,
-            device=device,
-            obs_z_encoder=obs_z_encoder,
-        )
-        self._pooling = pooling
-        self._history_length = history_length
-
-        # positional encoder
-        # 1000 for episode length
-        self.positional_encoding = (
-            torch.nn.Embedding.from_pretrained(
-                positional_encoding(
-                    1000 + self._history_length,
-                    preprocessed_dimension,
-                    device=device,
-                )
-            )
-            .requires_grad_(False)
-            .to(device)
-        )
-
-        obs_action_input_dimension = observation_length + action_length
-
-        self.obs_action_encoder = FARTEncoder(
-            raw_input_dimension=obs_action_input_dimension,
-            preprocessed_dimension=preprocessed_dimension,
-            postprocessed_dimension=postprocessed_dimension,
-            device=device,
-            pooling=pooling,
-            history_length=history_length,
-            transformer_dimension=transformer_dimension,
-        )
-
-        # recurrent/non-recurrent encoder for obs-z
-        if obs_z_encoder:
-            self.obs_encoder = FARTEncoder(
-                raw_input_dimension=observation_length + z_length,
-                preprocessed_dimension=preprocessed_dimension,
-                postprocessed_dimension=postprocessed_dimension,
-                device=device,
-                pooling=pooling,
-                history_length=history_length,
-                transformer_dimension=transformer_dimension,
-            )
-        else:
-            self.obs_encoder = AbstractPreprocessor(
-                observation_length=observation_length,
-                concatenated_variable_length=z_length,
-                feature_space_dimension=preprocessed_dimension,
-                hidden_dimension=obs_encoder_hidden_dimension,
-                hidden_layers=1,
-                activation="relu",
-                device=device,
-                layernorm=True,
-            )
-        self._obs_z_encoder = obs_z_encoder
-
-    @torch.no_grad()
-    def init_internal_state(
-        self,
-    ) -> Tuple[
-        Tuple[torch.Tensor, torch.Tensor],
-        Optional[Union[Tuple[torch.Tensor, torch.Tensor], None]],
-    ]:
-        """
-        Returns initial internal states of FART encoder(s).
         """
         if self._obs_z_encoder:
             return (

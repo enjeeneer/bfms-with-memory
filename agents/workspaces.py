@@ -3,7 +3,6 @@
 """Module that creates workspaces for training/evaling various agents."""
 import wandb
 import torch
-import gymnasium
 import shutil
 from os import makedirs
 from loguru import logger
@@ -11,29 +10,22 @@ from tqdm import tqdm
 import numpy as np
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Union, Optional, Tuple, Any
+from typing import Dict, List, Union, Optional, Tuple
 from scipy import stats
-from dataclasses import asdict
 from utils import (
     BASE_DIR,
-    upload_to_gcs_bucket,
     GOAL_BASED_EXORL_DOMAINS,
     VideoRecorder,
 )
-import matplotlib.pyplot as plt
-from popgym.core.env import POPGymEnv
 
 from rewards import RewardFunctionConstructor
-from agents.base import AbstractWorkspace
-from agents.fb.agent import FB
-
-from agents.rsf.agent import RSF
+from agents.hilp_m.agent import MemoryBasedHILP
 
 from agents.base import (
     MemoryEfficientOfflineReplayBuffer,
 )
-from agents.rfb.agent import RFB
-from agents.rnd.agent import RND
+from agents.fb_m.agent import MemoryBasedFB
+
 
 class ExorlWorkspace:
     """
@@ -93,7 +85,7 @@ class ExorlWorkspace:
 
     def train(
         self,
-        agent: Union[FB, RSF, RFB],
+        agent: Union[MemoryBasedFB, MemoryBasedHILP],
         agent_config: Dict,
         replay_buffer: MemoryEfficientOfflineReplayBuffer,
     ) -> None:
@@ -122,43 +114,6 @@ class ExorlWorkspace:
         best_mean_task_reward = -np.inf
         best_model_path = None
 
-        # sample set transitions for z inference
-        if isinstance(agent, (FB, SF, GCIQL)):
-            if "point_mass_maze" in self.domain_name:
-                self.goal_states = {}
-                for task, goal_state in point_mass_maze_goals.items():
-
-                    # we don't apply reward occlusion to goal-reaching
-                    # task definition
-                    self.goal_states[task] = torch.tensor(
-                        np.concatenate([goal_state] * self.goal_frames),
-                        dtype=torch.float32,
-                        device=self.device,
-                    ).unsqueeze(0)
-
-        if isinstance(agent, (RFB, RSF)):
-            if "point_mass_maze" in self.domain_name:
-                self.goal_states = {}
-                for task, goal_state in point_mass_maze_goals.items():
-                    # we don't apply reward occlusion to goal-reaching
-                    # task definition
-                    self.goal_states[task] = torch.tile(
-                        torch.tensor(
-                            goal_state,
-                            dtype=torch.float32,
-                            device=self.device,
-                        ),
-                        (1, agent.backward_history_length, 1),
-                    )
-
-            # if agent.observation_type == "states":
-            #     (
-            #         self.goals_z,
-            #         self.rewards_z,
-            #         self.positions_z,
-            #     ) = replay_buffer.sample_task_inference_transitions(
-            #         inference_steps=self.z_inference_steps,
-            #     )
         # for pixels we've already loaded the goals/rewards
         if agent.observation_type == "pixels":
             self.goals_z = replay_buffer._storage["goals_z"]  # pylint: disable=W0212
@@ -170,7 +125,7 @@ class ExorlWorkspace:
 
             batch = replay_buffer.sample(
                 batch_size=agent.batch_size,
-                return_rewards=isinstance(agent, TD3GRU),
+                return_rewards=False,
             )
             train_metrics = agent.update(batch=batch, step=i)
 
@@ -230,7 +185,7 @@ class ExorlWorkspace:
 
     def eval(
         self,
-        agent: Union[CQL, SAC, FB, CFB, CalFB, SF, RFB, GCIQL, TD3GRU],
+        agent: Union[MemoryBasedFB, MemoryBasedHILP],
         best_mean_task_reward: float,
         run_name: str,
         replay_buffer: MemoryEfficientOfflineReplayBuffer,
@@ -243,7 +198,7 @@ class ExorlWorkspace:
             metrics: dict of metrics
         """
 
-        if isinstance(agent, (FB, SF, RFB, RSF, GCIQL)):
+        if isinstance(agent, (MemoryBasedFB, MemoryBasedHILP)):
             zs = {}
 
             # fixed inference dataset
@@ -255,7 +210,7 @@ class ExorlWorkspace:
                 # positions = self.positions_z[(multiplier, multiplier)]
 
                 if self.domain_name in GOAL_BASED_EXORL_DOMAINS:
-                    if isinstance(agent, (FB, RFB, GCIQL)):
+                    if isinstance(agent, (MemoryBasedFB, MemoryBasedHILP)):
                         env_variant_zs = agent.infer_z(
                             replay_buffer=replay_buffer,
                             goal_state_dict=self.goal_states,
@@ -283,10 +238,10 @@ class ExorlWorkspace:
                 (multiplier, multiplier)
             ].reward_functions
 
-            if isinstance(agent, (FB, RFB, GCIQL)):
+            if isinstance(agent, (MemoryBasedFB)):
                 env_zs = zs[(multiplier, multiplier)]
             elif (
-                isinstance(agent, (SF, RSF))
+                isinstance(agent, (MemoryBasedHILP))
                 and self.domain_name not in GOAL_BASED_EXORL_DOMAINS
             ):
                 env_zs = zs[(multiplier, multiplier)]
@@ -301,9 +256,9 @@ class ExorlWorkspace:
 
                     timestep = env.reset()
                     step = 0
-                    if isinstance(agent, (TD3GRU, RFB, RSF)):
+                    if isinstance(agent, (MemoryBasedFB, MemoryBasedHILP)):
                         if not agent.inference_memory:
-                            if isinstance(agent, (RFB, RSF)):
+                            if isinstance(agent, (MemoryBasedFB, MemoryBasedHILP)):
                                 if agent.recurrent_actor:
                                     if agent.memory_type == "transformer":
                                         if agent.transformer_attention == "flash":
@@ -340,14 +295,7 @@ class ExorlWorkspace:
                         except:  # pylint: disable=bare-except
                             observation = self.dynamics_occlusion(timestep.observation)
 
-                        if isinstance(agent, (FB, GCIQL)):
-                            action, _ = agent.act(
-                                observation,
-                                task=env_zs[task],
-                                step=step,
-                                sample=False,
-                            )
-                        elif isinstance(agent, (RSF, SF)):
+                        if isinstance(agent, MemoryBasedHILP):
                             if self.domain_name not in GOAL_BASED_EXORL_DOMAINS:
                                 action, _ = agent.act(
                                     observation,
@@ -371,14 +319,7 @@ class ExorlWorkspace:
                                     sample=False,
                                 )
 
-                        elif isinstance(agent, TD3GRU):
-                            action, prev_obs_action_internal_state = agent.act(
-                                observation,
-                                step=step,
-                                sample=False,
-                                previous_internal_state=prev_obs_action_internal_state,
-                            )
-                        elif isinstance(agent, RFB):
+                        elif isinstance(agent, MemoryBasedFB):
                             (
                                 action,
                                 prev_obs_action_internal_state,
@@ -438,13 +379,13 @@ class ExorlWorkspace:
                 self.record_rollout(
                     agent=agent,
                     z_goal_state=env_zs[task]
-                    if isinstance(agent, (FB, RFB, SF, RSF))
+                    if isinstance(agent, (MemoryBasedFB, MemoryBasedHILP))
                     else None,
                     task=task,
                     run_name=run_name,
                 )
 
-        if isinstance(agent, (FB, SF, RFB)):
+        if isinstance(agent, (MemoryBasedFB, MemoryBasedHILP)):
             agent.std_dev_schedule = self.train_std
 
         return metrics
@@ -466,9 +407,9 @@ class ExorlWorkspace:
         video_recorder.init(env=env)
         timestep = env.reset()
         step = 0
-        if isinstance(agent, (TD3GRU, RFB, RSF)):
+        if isinstance(agent, (MemoryBasedFB, MemoryBasedHILP)):
             if not agent.inference_memory:
-                if isinstance(agent, (RFB, RSF)):
+                if isinstance(agent, (MemoryBasedFB, MemoryBasedHILP)):
                     if agent.recurrent_actor:
                         if agent.memory_type == "transformer":
                             if agent.transformer_attention == "flash":
@@ -504,14 +445,14 @@ class ExorlWorkspace:
             except:  # pylint: disable=bare-except
                 observation = self.dynamics_occlusion(timestep.observation)
 
-            if isinstance(agent, (FB, GCIQL)):
+            if isinstance(agent, MemoryBasedFB):
                 action, _ = agent.act(
                     observation,
                     task=z_goal_state,
                     step=step,
                     sample=False,
                 )
-            elif isinstance(agent, (SF, RSF)):
+            elif isinstance(agent, MemoryBasedHILP):
                 if self.domain_name not in GOAL_BASED_EXORL_DOMAINS:
                     action, _ = agent.act(
                         observation,
@@ -534,15 +475,7 @@ class ExorlWorkspace:
                         step=step,
                         sample=False,
                     )
-
-            elif isinstance(agent, TD3GRU):
-                action, prev_obs_action_internal_state = agent.act(
-                    observation,
-                    step=step,
-                    sample=False,
-                    previous_internal_state=prev_obs_action_internal_state,
-                )
-            elif isinstance(agent, RFB):
+            elif isinstance(agent, MemoryBasedFB):
 
                 (
                     action,

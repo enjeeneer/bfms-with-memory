@@ -11,14 +11,11 @@ import os
 from pathlib import Path
 
 from agents.base import (
-    OfflineReplayBuffer,
     MemoryEfficientOfflineReplayBuffer,
 )
 from agents.workspaces import ExorlWorkspace
-from agents.fb.agent import FB
-from agents.rfb.agent import RFB
-from agents.rsf.agent import RSF
-from agents.fb.replay_buffer import ZeroShotReplayBuffer
+from agents.fb_m.agent import MemoryBasedFB
+from agents.hilp_m.agent import MemoryBasedHILP
 
 from rewards import RewardFunctionConstructor
 from occlusions import DYNAMICS_OCCLUSIONS, REWARD_OCCLUSIONS
@@ -98,46 +95,24 @@ os.environ["GOOGLE_CLOUD_PROJECT"] = "zero-shot-datasets"
 
 assert args.episodes * 1000 >= args.dataset_transitions
 
-if args.algorithm == "confb" and args.history_length == 0:
-    raise ValueError("RFB requires history_length > 0")
-
-if args.algorithm in ("vcfb"):
-    args.vcfb = True
-    args.mcfb = False
-    args.dvcfb = False
-elif args.algorithm in ("mcfb"):
-    args.vcfb = False
-    args.mcfb = True
-    args.dvcfb = False
-elif args.algorithm == "dvcfb":
-    args.vcfb = False
-    args.mcfb = False
-    args.dvcfb = True
+if args.algorithm == "fb_m" and args.history_length == 0:
+    raise ValueError("MemoryBasedFB requires history_length > 0")
 
 if args.dataset_transitions == -1:
     args.dataset_transitions = None
 
 working_dir = Path.cwd()
 
-# TD7 config not loaded like all other algos
-if args.algorithm == "td7":
-    config = {"offline": False}
+if args.algorithm in ("sf-lap", "sf-hilp"):
+    algo_dir = "sf"
+    config_path = working_dir / "agents" / algo_dir / "config.yaml"
+    model_dir = working_dir / "agents" / algo_dir / "saved_models"
 else:
-    if args.algorithm in ("vcfb", "mcfb", "dvcfb"):
-        algo_dir = "cfb"
-        config_path = working_dir / "agents" / algo_dir / "config.yaml"
-        model_dir = working_dir / "agents" / algo_dir / "saved_models"
+    config_path = working_dir / "agents" / args.algorithm / "config.yaml"
+    model_dir = working_dir / "agents" / args.algorithm / "saved_models"
 
-    elif args.algorithm in ("sf-lap", "sf-hilp"):
-        algo_dir = "sf"
-        config_path = working_dir / "agents" / algo_dir / "config.yaml"
-        model_dir = working_dir / "agents" / algo_dir / "saved_models"
-    else:
-        config_path = working_dir / "agents" / args.algorithm / "config.yaml"
-        model_dir = working_dir / "agents" / args.algorithm / "saved_models"
-
-    with open(config_path, "rb") as f:
-        config = yaml.safe_load(f)
+with open(config_path, "rb") as f:
+    config = yaml.safe_load(f)
 
 time = datetime.datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
 
@@ -191,15 +166,8 @@ else:
 # pull data from GCS
 dataset_paths = []
 if config["algorithm"] in (
-    "fb",
-    "vcfb",
-    "mcfb",
-    "sf-lap",
-    "sf-hilp",
-    "dvcfb",
-    "rfb",
-    "rsf",
-    "gciql",
+    "fb_m",
+    "hilp_m",
 ):
     for multiplier in config["train_multipliers"]:
         dataset_path, pixel_dataset = download_from_gcs_bucket(
@@ -273,374 +241,8 @@ rewards_occlusion = REWARD_OCCLUSIONS[config["domain_name"]](
     missing_sensor_prob=config["missing_sensor_prob"],
 )
 
-if config["algorithm"] == "cql":
-    agent = CQL(
-        observation_length=dynamics_occlusion.observation_length,
-        action_length=action_length,
-        device=config["device"],
-        name=config["name"],
-        batch_size=config["batch_size"],
-        discount=config["discount"],
-        critic_hidden_dimension=config["critic_hidden_dimension"],
-        critic_hidden_layers=config["critic_hidden_layers"],
-        critic_betas=config["critic_betas"],
-        critic_tau=config["critic_tau"],
-        critic_learning_rate=config["critic_learning_rate"],
-        critic_target_update_frequency=config["critic_target_update_frequency"],
-        actor_hidden_dimension=config["actor_hidden_dimension"],
-        actor_hidden_layers=config["actor_hidden_layers"],
-        actor_betas=config["actor_betas"],
-        actor_learning_rate=config["actor_learning_rate"],
-        actor_log_std_bounds=config["actor_log_std_bounds"],
-        alpha_learning_rate=config["alpha_learning_rate"],
-        alpha_betas=config["alpha_betas"],
-        actor_update_frequency=config["actor_update_frequency"],
-        init_temperature=config["init_temperature"],
-        learnable_temperature=config["learnable_temperature"],
-        activation=config["activation"],
-        action_range=action_range,
-        normalisation_samples=None,
-        cql_n_samples=config["cql_n_samples"],
-        cql_lagrange=False,
-        cql_alpha=config["cql_alpha"],
-        cql_target_penalty=config["target_conservative_penalty"],
-    )
-
-    # load buffer
-    replay_buffer = OfflineReplayBuffer(
-        reward_constructor=train_reward_constructor,
-        dataset_paths=dataset_paths,
-        transitions=config["dataset_transitions"],
-        relabel=relabel,
-        task=config["train_task"],
-        device=config["device"],
-        discount=config["discount"],
-        load_rewards=True,
-        reward_occlusion=rewards_occlusion,
-        dynamics_occlusion=dynamics_occlusion,
-        no_episodes=config["episodes"],
-        frames=config["frames"],
-    )
-
-    z_inference_steps = None
-    train_std = None
-    eval_std = None
-
-elif config["algorithm"] == "td3":
-    agent = TD3(
-        observation_length=dynamics_occlusion.observation_length,
-        action_length=action_length,
-        device=config["device"],
-        name=config["name"],
-        critic_hidden_dimension=config["critic_hidden_dimension"],
-        critic_hidden_layers=config["critic_hidden_layers"],
-        critic_learning_rate=config["critic_learning_rate"],
-        critic_activation=config["activation"],
-        actor_hidden_dimension=config["actor_hidden_dimension"],
-        actor_hidden_layers=config["actor_hidden_layers"],
-        actor_learning_rate=config["actor_learning_rate"],
-        actor_activation=config["activation"],
-        std_dev_clip=config["std_dev_clip"],
-        std_dev_schedule=config["std_dev_schedule"],
-        batch_size=config["batch_size"],
-        discount=config["discount"],
-        tau=config["critic_tau"],
-        actor_update_frequency=config["actor_update_frequency"],
-        critic_target_update_frequency=config["critic_target_update_frequency"],
-    )
-
-    # load buffer
-    replay_buffer = OfflineReplayBuffer(
-        reward_constructor=train_reward_constructor,
-        dataset_paths=dataset_paths,
-        transitions=config["dataset_transitions"],
-        relabel=relabel,
-        task=config["train_task"],
-        device=config["device"],
-        discount=config["discount"],
-        load_rewards=True,
-        reward_occlusion=rewards_occlusion,
-        dynamics_occlusion=dynamics_occlusion,
-        no_episodes=config["episodes"],
-        frames=config["frames"],
-    )
-
-    z_inference_steps = None
-    train_std = None
-    eval_std = None
-
-elif config["algorithm"] == "td3gru":
-
-    agent = TD3GRU(
-        observation_length=dynamics_occlusion.observation_length,
-        action_length=action_length,
-        device=config["device"],
-        name=config["name"],
-        critic_learning_rate=config["critic_learning_rate"],
-        actor_learning_rate=config["actor_learning_rate"],
-        std_dev_clip=config["std_dev_clip"],
-        std_dev_schedule=config["std_dev_schedule"],
-        batch_size=config["batch_size"],
-        discount=config["discount"],
-        tau=config["critic_tau"],
-        actor_update_frequency=config["actor_update_frequency"],
-        actor_hidden_dimension=config["actor_hidden_dimension"],
-        actor_hidden_layers=config["actor_hidden_layers"],
-        obs_encoder_hidden_dimension=config["obs_encoder_hidden_dimension"],
-        critic_target_update_frequency=config["critic_target_update_frequency"],
-        recurrent_critic_hidden_dimension=config["recurrent_critic_hidden_dimension"],
-        history_length=config["history_length"],
-        inference_memory=config["inference_memory"],
-        preprocessed_dimension=config["preprocessed_dimension"],
-        postprocessed_dimension=config["postprocessed_dimension"],
-        num_encoder_layers=config["num_encoder_layers"],
-    )
-
-    replay_buffer = MemoryEfficientOfflineReplayBuffer(
-        dataset_paths=dataset_paths,
-        reward_constructors=reward_constructors,
-        eval_multipliers=config["eval_multipliers"],
-        discount=config["discount"],
-        device=config["device"],
-        max_episodes=config["episodes"],
-        reward_occlusion=rewards_occlusion,
-        dynamics_occlusion=dynamics_occlusion,
-        relabel=relabel,
-        frames=config["frames"],
-        obs_type=config["obs_type"],
-        task=config["train_task"],
-        history_length=config["history_length"],
-        pad_with_zeros=config["pad_with_zeros"],
-        goal_frames=config["goal_frames"],
-    )
-
-    z_inference_steps = None
-    train_std = None
-    eval_std = None
-
-
-elif config["algorithm"] == "gciql":
-    agent = GCIQL(
-        observation_length=dynamics_occlusion.observation_length,
-        action_length=action_length,
-        device=config["device"],
-        name=config["name"],
-        critic_hidden_dimension=config["critic_hidden_dimension"],
-        critic_hidden_layers=config["critic_hidden_layers"],
-        critic_activation=config["activation"],
-        actor_hidden_dimension=config["actor_hidden_dimension"],
-        actor_hidden_layers=config["actor_hidden_layers"],
-        actor_learning_rate=config["actor_learning_rate"],
-        actor_activation=config["activation"],
-        batch_size=config["batch_size"],
-        discount=config["discount"],
-        tau=config["critic_tau"],
-        actor_update_frequency=config["actor_update_frequency"],
-        temperature=config["temperature"],
-        expectile=config["expectile"],
-        value_learning_rate=config["value_learning_rate"],
-        critic_target_update_frequency=config["critic_target_update_frequency"],
-    )
-
-    # load buffer
-    replay_buffer = ZeroShotReplayBuffer(
-        reward_constructors=reward_constructors,
-        dataset_paths=dataset_paths,
-        transitions=config["dataset_transitions"],
-        relabel=relabel,
-        task=config["train_task"],
-        device=config["device"],
-        discount=config["discount"],
-        reward_occlusion=rewards_occlusion,
-        dynamics_occlusion=dynamics_occlusion,
-        eval_multipliers=config["eval_multipliers"],
-        no_episodes=config["episodes"],
-        frames=config["frames"],
-    )
-
-    z_inference_steps = config["z_inference_steps"]
-    train_std = None
-    eval_std = None
-
-
-elif config["algorithm"] == "td7":
-
-    assert len(config["eval_tasks"]) == 1, "TD7 only supports one eval task"
-    assert (
-        len(config["eval_multipliers"]) == 1
-    ), "TD7 only supports one eval body mass multiplier"
-
-    agent = TD7(
-        state_dim=dynamics_occlusion.observation_length,
-        action_dim=action_length,
-        max_action=max(train_reward_constructor.env.action_spec().maximum),
-        device=config["device"],
-        offline=config["offline"],
-    )
-
-    # load buffer
-    dummy_replay_buffer = OfflineReplayBuffer(
-        reward_constructor=train_reward_constructor,
-        dataset_paths=dataset_paths,
-        transitions=config["dataset_transitions"],
-        relabel=relabel,
-        task=config["train_task"],
-        device=config["device"],
-        discount=agent.hp.discount,
-        load_rewards=True,
-        reward_occlusion=rewards_occlusion,
-        dynamics_occlusion=dynamics_occlusion,
-        no_episodes=config["episodes"],
-        frames=config["frames"],
-    )
-
-    # load normal buffer into TD7 replay buffer
-    agent.replay_buffer.state = (
-        dummy_replay_buffer.storage["observations"].cpu().numpy()
-    )
-    agent.replay_buffer.action = dummy_replay_buffer.storage["actions"].cpu().numpy()
-    agent.replay_buffer.next_state = (
-        dummy_replay_buffer.storage["next_observations"].cpu().numpy()
-    )
-    agent.replay_buffer.reward = (
-        dummy_replay_buffer.storage["rewards"].reshape(-1, 1).cpu().numpy()
-    )
-    agent.replay_buffer.not_done = (
-        dummy_replay_buffer.storage["not_dones"].reshape(-1, 1).cpu().numpy()
-    )
-    agent.replay_buffer.size = agent.replay_buffer.state.shape[0]
-    if agent.replay_buffer.prioritized:
-        agent.replay_buffer.priority = torch.ones(agent.replay_buffer.size).to(
-            agent.device
-        )
-
-    eval_reward_constructor = reward_constructors[
-        (config["eval_multipliers"][0], config["eval_multipliers"][0])
-    ]
-
-    workspace = TD7Workspace(
-        reward_constructor=train_reward_constructor,
-        eval_reward_constructor=eval_reward_constructor,
-        config=config,
-        body_mass_multiplier=config["eval_multipliers"][0],
-        damping_multiplier=config["eval_multipliers"][0],
-        dynamics_occlusion=dynamics_occlusion,
-    )
-
-elif config["algorithm"] == "fb":
-
-    if config["frames"] > 1 and config["obs_type"] == "states":
-        observation_dims = dynamics_occlusion.observation_length * config["frames"]
-    else:
-        observation_dims = dynamics_occlusion.observation_length
-
-    if config["action_in_B"]:
-        assert config["backward_history_length"] == 1 and config["goal_frames"] == 1
-
-    agent = FB(
-        observation_dims=observation_dims,
-        observation_type=config["obs_type"],
-        action_length=action_length,
-        goal_dimension=rewards_occlusion.observation_length * config["goal_frames"],
-        preprocessed_dimension=config["preprocessed_dimension"],
-        postprocessed_dimension=config["postprocessed_dimension"],
-        forward_hidden_dimension=config["forward_hidden_dimension"],
-        forward_hidden_layers=config["forward_hidden_layers"],
-        backward_hidden_dimension=config["backward_hidden_dimension"],
-        backward_hidden_layers=config["backward_hidden_layers"],
-        actor_hidden_dimension=config["actor_hidden_dimension"],
-        actor_hidden_layers=config["actor_hidden_layers"],
-        forward_activation=config["forward_activation"],
-        backward_activation=config["backward_activation"],
-        actor_activation=config["actor_activation"],
-        z_dimension=config["z_dimension"],
-        critic_learning_rate=config["critic_learning_rate"],
-        actor_learning_rate=config["actor_learning_rate"],
-        learning_rate_coefficient=config["learning_rate_coefficient"],
-        orthonormalisation_coefficient=config["orthonormalisation_coefficient"],
-        discount=config["discount"],
-        action_in_B=config["action_in_B"],
-        z_inference_steps=config["z_inference_steps"],
-        frames=config["frames"],
-        batch_size=config["batch_size"],
-        z_mix_ratio=config["z_mix_ratio"],
-        gaussian_actor=config["gaussian_actor"],
-        std_dev_clip=config["std_dev_clip"],
-        std_dev_schedule=config["std_dev_schedule"],
-        tau=config["tau"],
-        device=config["device"],
-        name=config["name"],
-        discrete_actions=config["discrete_actions"],
-        exploration_epsilon=config["exploration_epsilon"],
-        boltzmann_temperature=config["boltzmann_temperature"],
-    )
-
-    # load buffer
-    # if we're working with pixels then we init an empty buffer
-    # and load in the pre-formed dataset
-    if config["obs_type"] == "pixels":
-        replay_buffer = MemoryEfficientOfflineReplayBuffer(
-            dataset_paths=dataset_paths,
-            discount=config["discount"],
-            device=config["device"],
-            max_episodes=config["episodes"],
-            reward_occlusion=rewards_occlusion,
-            dynamics_occlusion=dynamics_occlusion,
-            relabel=relabel,
-            frames=config["frames"],
-            history_length=config["history_length"],
-            goal_history_length=config["backward_history_length"],
-            obs_type=config["obs_type"],
-            reward_constructors=reward_constructors,
-            eval_multipliers=config["eval_multipliers"],
-            load_on_init=False,
-            pad_with_zeros=config["pad_with_zeros"],
-            goal_frames=config["goal_frames"],
-        )
-
-        replay_buffer._storage = pixel_dataset["dataset"]
-        replay_buffer._max_episodes = replay_buffer._storage["pixel"].shape[0]
-        replay_buffer._episode_lengths = np.repeat(
-            replay_buffer._storage["pixel"].shape[1] - 1, replay_buffer._max_episodes
-        )
-        replay_buffer._full = True
-
-        # hack the dones (we know last transition is terminal)
-        not_dones = np.ones_like(replay_buffer._storage["discount"], dtype=float)
-        not_dones[:, -1] = 0.0
-        replay_buffer._storage["not_done"] = not_dones
-        replay_buffer._storage["goals_z"] = pixel_dataset[MDP_domain_name]["goals_z"]
-        replay_buffer._storage["rewards_z"] = pixel_dataset[MDP_domain_name][
-            "rewards_z"
-        ]
-
-    else:
-        replay_buffer = MemoryEfficientOfflineReplayBuffer(
-            dataset_paths=dataset_paths,
-            discount=config["discount"],
-            device=config["device"],
-            max_episodes=config["episodes"],
-            reward_occlusion=rewards_occlusion,
-            dynamics_occlusion=dynamics_occlusion,
-            relabel=relabel,
-            frames=config["frames"],
-            history_length=config["history_length"],
-            goal_history_length=config["backward_history_length"],
-            obs_type=config["obs_type"],
-            reward_constructors=reward_constructors,
-            eval_multipliers=config["eval_multipliers"],
-            load_on_init=True,
-            pad_with_zeros=config["pad_with_zeros"],
-            goal_frames=config["goal_frames"],
-        )
-
-    z_inference_steps = config["z_inference_steps"]
-    train_std = config["std_dev_schedule"]
-    eval_std = config["std_dev_eval"]
-
-elif config["algorithm"] == "rfb":
-
-    if config["memory_type"] in ["fart", "transformer"] and config["pooling"] is None:
+if config["algorithm"] == "fb_m":
+    if config["memory_type"] in ["transformer"] and config["pooling"] is None:
         raise ValueError("FART/Transformer requires pooling to be set")
 
     if (
@@ -664,7 +266,7 @@ elif config["algorithm"] == "rfb":
             "so to have a non-zero history length, it must be set to at least 2 for ."
         )
 
-    agent = RFB(
+    agent = MemoryBasedFB(
         observation_dims=dynamics_occlusion.observation_length,
         observation_type=config["obs_type"],
         action_length=action_length,
@@ -783,88 +385,14 @@ elif config["algorithm"] == "rfb":
     train_std = config["std_dev_schedule"]
     eval_std = config["std_dev_eval"]
 
-elif config["algorithm"] in ["sf-lap", "sf-hilp"]:
-
-    if config["algorithm"] == "sf-lap":
-        config["sf_features"] = "laplacian"
-        config["hilp_p_random_goal"] = 0
-    elif config["algorithm"] == "sf-hilp":
-        config["sf_features"] = "hilp"
-        config["hilp_p_random_goal"] = 0.375
-        if MDP_domain_name == "walker":
-            config["hilp_discount"] = 0.96
-    else:
-        raise ValueError(f"Unknown algorithm {config['algorithm']}")
-    agent = SF(
-        observation_length=dynamics_occlusion.observation_length * config["frames"],
-        action_length=action_length,
-        observation_type=config["obs_type"],
-        goal_dimension=rewards_occlusion.observation_length * config["goal_frames"],
-        preprocessed_dimension=config["preprocessed_dimension"],
-        postprocessed_dimension=config["postprocessed_dimension"],
-        forward_hidden_dimension=config["forward_hidden_dimension"],
-        forward_hidden_layers=config["forward_hidden_layers"],
-        features_hidden_dimension=config["features_hidden_dimension"],
-        features_hidden_layers=config["features_hidden_layers"],
-        features_activation=config["features_activation"],
-        actor_hidden_dimension=config["actor_hidden_dimension"],
-        actor_hidden_layers=config["actor_hidden_layers"],
-        forward_activation=config["forward_activation"],
-        actor_activation=config["actor_activation"],
-        z_dimension=config["z_dimension"],
-        sf_learning_rate=config["sf_learning_rate"],
-        feature_learning_rate=config["feature_learning_rate"],
-        actor_learning_rate=config["actor_learning_rate"],
-        batch_size=config["batch_size"],
-        gaussian_actor=config["gaussian_actor"],
-        std_dev_clip=config["std_dev_clip"],
-        std_dev_schedule=config["std_dev_schedule"],
-        z_inference_steps=config["z_inference_steps"],
-        tau=config["tau"],
-        device=config["device"],
-        name=config["name"],
-        z_mix_ratio=config["z_mix_ratio"],
-        q_loss=MDP_domain_name in ("quadruped", "jaco")
-        if config["sf_features"] == "hilp"
-        else True,
-        features=config["sf_features"],
-        hilp_discount=config["hilp_discount"],
-        hilp_iql_expectile=config["hilp_iql_expectile"],
-        frames=config["frames"],
-    )
-
-    # load buffer
-    replay_buffer = MemoryEfficientOfflineReplayBuffer(
-        dataset_paths=dataset_paths,
-        reward_constructors=reward_constructors,
-        eval_multipliers=config["eval_multipliers"],
-        discount=config["discount"],
-        device=config["device"],
-        max_episodes=config["episodes"],
-        reward_occlusion=rewards_occlusion,
-        dynamics_occlusion=dynamics_occlusion,
-        relabel=relabel,
-        frames=config["frames"],
-        obs_type=config["obs_type"],
-        task=config["train_task"],
-        history_length=config["history_length"],
-        load_on_init=True,
-        pad_with_zeros=config["pad_with_zeros"],
-        goal_frames=config["goal_frames"],
-    )
-
-    z_inference_steps = config["z_inference_steps"]
-    train_std = config["std_dev_schedule"]
-    eval_std = config["std_dev_eval"]
-
-elif config["algorithm"] in ["rsf"]:
+elif config["algorithm"] in ["hilp_m"]:
 
     config["sf_features"] = "hilp"
     config["hilp_p_random_goal"] = 0.375
     if MDP_domain_name == "walker":
         config["hilp_discount"] = 0.96
 
-    agent = RSF(
+    agent = MemoryBasedHILP(
         observation_dims=dynamics_occlusion.observation_length,
         action_length=action_length,
         observation_type=config["obs_type"],
@@ -939,116 +467,33 @@ elif config["algorithm"] in ["rsf"]:
     z_inference_steps = config["z_inference_steps"]
     train_std = config["std_dev_schedule"]
     eval_std = config["std_dev_eval"]
-
-elif config["algorithm"] in ("vcfb", "mcfb", "dvcfb"):
-
-    agent = CFB(
-        observation_length=dynamics_occlusion.observation_length,
-        action_length=action_length,
-        goal_dimension=rewards_occlusion.observation_length * config["goal_frames"],
-        preprocessor_hidden_dimension=config["preprocessor_hidden_dimension"],
-        preprocessor_output_dimension=config["preprocessor_output_dimension"],
-        preprocessor_hidden_layers=config["preprocessor_hidden_layers"],
-        forward_hidden_dimension=config["forward_hidden_dimension"],
-        forward_hidden_layers=config["forward_hidden_layers"],
-        backward_hidden_dimension=config["backward_hidden_dimension"],
-        backward_hidden_layers=config["backward_hidden_layers"],
-        actor_hidden_dimension=config["actor_hidden_dimension"],
-        actor_hidden_layers=config["actor_hidden_layers"],
-        preprocessor_activation=config["preprocessor_activation"],
-        forward_activation=config["forward_activation"],
-        backward_activation=config["backward_activation"],
-        actor_activation=config["actor_activation"],
-        z_dimension=config["z_dimension"],
-        actor_learning_rate=config["actor_learning_rate"],
-        critic_learning_rate=config["critic_learning_rate"],
-        learning_rate_coefficient=config["learning_rate_coefficient"],
-        orthonormalisation_coefficient=config["orthonormalisation_coefficient"],
-        discount=config["discount"],
-        batch_size=config["batch_size"],
-        z_mix_ratio=config["z_mix_ratio"],
-        gaussian_actor=config["gaussian_actor"],
-        std_dev_clip=config["std_dev_clip"],
-        std_dev_schedule=config["std_dev_schedule"],
-        tau=config["tau"],
-        device=config["device"],
-        vcfb=config["vcfb"],
-        mcfb=config["mcfb"],
-        dvcfb=config["dvcfb"],
-        total_action_samples=config["total_action_samples"],
-        ood_action_weight=config["ood_action_weight"],
-        alpha=config["alpha"],
-        target_conservative_penalty=config["target_conservative_penalty"],
-        lagrange=config["lagrange"],
-    )
-
-    # load buffer
-    replay_buffer = MemoryEfficientOfflineReplayBuffer(
-        dataset_paths=dataset_paths,
-        reward_constructors=reward_constructors,
-        eval_multipliers=config["eval_multipliers"],
-        discount=config["discount"],
-        device=config["device"],
-        max_episodes=config["episodes"],
-        reward_occlusion=rewards_occlusion,
-        dynamics_occlusion=dynamics_occlusion,
-        relabel=relabel,
-        frames=config["frames"],
-        obs_type=config["obs_type"],
-        task=config["train_task"],
-        history_length=config["history_length"],
-        pad_with_zeros=config["pad_with_zeros"],
-        goal_frames=config["goal_frames"],
-    )
-
-    z_inference_steps = config["z_inference_steps"]
-    train_std = config["std_dev_schedule"]
-    eval_std = config["std_dev_eval"]
-
 else:
     raise NotImplementedError(f"Algorithm {config['algorithm']} not implemented")
 
-if config["algorithm"] == "td7":
-    workspace = TD7Workspace(
-        reward_constructor=train_reward_constructor,
-        eval_reward_constructor=eval_reward_constructor,
-        config=config,
-        body_mass_multiplier=config["eval_multipliers"][0],
-        damping_multiplier=config["eval_multipliers"][0],
-        use_checkpoints=False,
-        dynamics_occlusion=dynamics_occlusion,
-        wandb_logging=config["wandb_logging"],
-    )
-else:
-    workspace = ExorlWorkspace(
-        reward_constructors=reward_constructors,
-        learning_steps=config["learning_steps"],
-        model_dir=model_dir,
-        goal_frames=config["goal_frames"],
-        eval_frequency=config["eval_frequency"],
-        eval_rollouts=config["eval_rollouts"],
-        z_inference_steps=z_inference_steps,
-        train_std=train_std,
-        eval_std=eval_std,
-        wandb_logging=config["wandb_logging"],
-        device=config["device"],
-        eval_multipliers=config["eval_multipliers"],
-        save_model=config["save_model"],
-        save_multiplier=config["eval_multipliers"][0] if config["save_model"] else None,
-        reward_occlusion=rewards_occlusion,
-        dynamics_occlusion=dynamics_occlusion,
-        wandb_project=config["wandb_project"],
-        wandb_entity=config["wandb_entity"],
-    )
+workspace = ExorlWorkspace(
+    reward_constructors=reward_constructors,
+    learning_steps=config["learning_steps"],
+    model_dir=model_dir,
+    goal_frames=config["goal_frames"],
+    eval_frequency=config["eval_frequency"],
+    eval_rollouts=config["eval_rollouts"],
+    z_inference_steps=z_inference_steps,
+    train_std=train_std,
+    eval_std=eval_std,
+    wandb_logging=config["wandb_logging"],
+    device=config["device"],
+    eval_multipliers=config["eval_multipliers"],
+    save_model=config["save_model"],
+    save_multiplier=config["eval_multipliers"][0] if config["save_model"] else None,
+    reward_occlusion=rewards_occlusion,
+    dynamics_occlusion=dynamics_occlusion,
+    wandb_project=config["wandb_project"],
+    wandb_entity=config["wandb_entity"],
+)
 
 if __name__ == "__main__":
-
-    # td7 has different workspace
-    if config["algorithm"] == "td7":
-        workspace.train_offline(agent=agent, task=config["eval_tasks"][0])
-    else:
-        workspace.train(
-            agent=agent,
-            agent_config=config,
-            replay_buffer=replay_buffer,
-        )
+    workspace.train(
+        agent=agent,
+        agent_config=config,
+        replay_buffer=replay_buffer,
+    )

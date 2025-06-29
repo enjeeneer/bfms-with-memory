@@ -1,6 +1,6 @@
 # pylint: disable=all
 """
-Amago's transformer implementation taken directly from:
+Transformer implementation taken directly from:
 https://github.com/UT-Austin-RPL/amago/blob/main/amago/nets/transformer.py
 """
 
