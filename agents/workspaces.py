@@ -21,9 +21,7 @@ from utils import (
 from rewards import RewardFunctionConstructor
 from agents.hilp_m.agent import MemoryBasedHILP
 
-from agents.base import (
-    MemoryEfficientOfflineReplayBuffer,
-)
+from agents.replay_buffer import MemoryEfficientOfflineReplayBuffer
 from agents.fb_m.agent import MemoryBasedFB
 
 

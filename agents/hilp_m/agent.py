@@ -17,9 +17,9 @@ from agents.base import (
     AbstractAgent,
     Batch,
     make_aug_encoder,
-    MemoryEfficientOfflineReplayBuffer,
     MLPActor,
 )
+from agents.replay_buffer import MemoryEfficientOfflineReplayBuffer
 from agents.utils import schedule
 
 

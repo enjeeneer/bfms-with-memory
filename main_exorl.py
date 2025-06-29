@@ -10,9 +10,7 @@ import numpy as np
 import os
 from pathlib import Path
 
-from agents.base import (
-    MemoryEfficientOfflineReplayBuffer,
-)
+from agents.replay_buffer import MemoryEfficientOfflineReplayBuffer
 from agents.workspaces import ExorlWorkspace
 from agents.fb_m.agent import MemoryBasedFB
 from agents.hilp_m.agent import MemoryBasedHILP

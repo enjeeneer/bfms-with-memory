@@ -19,8 +19,8 @@ from agents.base import (
     TransformerActor,
     S4DActor,
     make_aug_encoder,
-    MemoryEfficientOfflineReplayBuffer,
 )
+from agents.replay_buffer import MemoryEfficientOfflineReplayBuffer
 from agents.utils import schedule, get_grad_norm
 
 
