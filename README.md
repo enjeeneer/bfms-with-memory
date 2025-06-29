@@ -86,5 +86,16 @@ To train a standard FB-M model, with GRU memory model on `rnd` to solve all task
 python main_exorl.py fb_m walker_flickering rnd --memory_type=gru --eval_task stand run walk flip
 ```
 
+Read the [full paper](https://arxiv.org/abs/2506.15446) for more details! If you found this work useful, please 
+consider citing it:
+```commandline
+@article{jeen2025zero,
+  author = {Jeen, Scott and Bewley, Tom and Cullen, Jonathan M.},  
+  title = {Zero-Shot Reinforcement Learning Under Partial Observability},
+  journal={arXiv preprint arXiv:2506.15446},
+  year={2025}
+}
+```
+
 ## License 
 This work licensed under a standard MIT License, see `LICENSE.md` for further details.
