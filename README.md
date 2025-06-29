@@ -4,7 +4,7 @@
 <a href="https://github.com/psf/black"><img alt="Code style: black" src="https://img.shields.io/badge/code%20style-black-000000.svg"></a>
  [![Paper](http://img.shields.io/badge/paper-arxiv.2506.15446-B31B1B.svg)](https://arxiv.org/abs/2506.15446)
 
-<img src="/assets/fb-with-memory-archtectu.png" width=85% height=auto class="center">
+<img src="/assets/fb-with-memory-architecture.png" width=85% height=auto class="center">
 
 _Figure 1: Behaviour foundation models (BFMs) with memory._
 
